@@ -294,6 +294,11 @@ function normSleep(rec) {
   out.mainMin = main ?? daily;
   out.napMin = pickDur(kv, [/napstotal/, /naps?(total)?(duration|time)?$/, /nap/]) || 0;
   out.totalMin = daily ?? (out.mainMin != null ? out.mainMin + (out.napMin || 0) : null);
+  // Hauptschlaf inkl. Wachzeit (COROS-Anteile beziehen sich auf diese Gesamtzeit)
+  out.periodMin = pickDur(kv, [/mainsleepperiod/, /sleepperiod/, /inclawake/, /timeinbed/]);
+  out.awakeMin = pickDur(kv, [/^awake(time|duration)?$/, /awake/, /wakeduration|wakefulness/], /count|times|number|ratio|pct|percent/);
+  if (!isNum(out.periodMin) && isNum(out.mainMin) && isNum(out.awakeMin)) out.periodMin = out.mainMin + out.awakeMin;
+  const pcts = {};
   const stage = (name) => {
     const k = getk(kv, [new RegExp('^' + name + '(sleep)?(ratio|pct|percent|percentage|proportion)$'), new RegExp(name + '.*(ratio|pct|percent)')]);
     const pk = k ? pctOf(kv[k], k) : null;
@@ -303,12 +308,20 @@ function normSleep(rec) {
     let mins = dkey && !dIsPct ? parseDurMin(dval, dkey) : null;
     let pct = pk;
     if (pct == null && dval != null && /%/.test(String(dval))) pct = pctOf(dval);
-    if (mins == null && pct != null && out.mainMin) mins = pct / 100 * out.mainMin;
+    if (pct != null) pcts[name] = pct;
+    if (mins == null && pct != null && (out.periodMin || out.mainMin)) mins = pct / 100 * (out.periodMin || out.mainMin);
     if (dkey && isNum(kv[dkey]) && kv[dkey] > 1440) mins = kv[dkey] / 60;
     return mins;
   };
   out.deepMin = stage('deep'); out.lightMin = stage('light'); out.remMin = stage('rem');
-  out.awakeMin = pickDur(kv, [/^awake(time|duration)?$/, /awake/, /wakeduration|wakefulness/], /count|times|number/);
+  const ak = getk(kv, [/^awake(ratio|pct|percent)$/]); if (ak) pcts.awake = pctOf(kv[ak], ak);
+  for (const [k, v] of Object.entries(pcts)) if (isNum(v)) out[k + 'Pct'] = v;
+  out.awakeCount = parseNum(getv(kv, [/awakecount/, /wakecount/, /awakenings/]));
+  // Phasen-Minuten so verteilen, dass sie zusammen die Schlafzeit ergeben (COROS rundet die Prozente)
+  if (isNum(out.mainMin) && ['deep', 'light', 'rem'].every(k => isNum(pcts[k]))) {
+    const ps = pcts.deep + pcts.light + pcts.rem;
+    if (ps > 0) for (const k of ['deep', 'light', 'rem']) out[k + 'Min'] = pcts[k] / ps * out.mainMin;
+  }
   const w = getv(kv, [/mainsleepwindow/, /sleepwindow/, /window/]);
   Object.assign(out, parseWindow(w, rec.date));
   if (!out.start) {

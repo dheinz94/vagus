@@ -181,8 +181,8 @@ const store = {
     try { localStorage.removeItem(LS_KEY); } catch (e) { }
   }
 };
-function saveUi() { try { localStorage.setItem(LS_UI, JSON.stringify({ skin: app.skin, demoPref: app.demoPref, trend: app.trend })); } catch (e) { } }
-function loadUi() { try { const u = JSON.parse(localStorage.getItem(LS_UI) || '{}'); if (u.skin) app.skin = u.skin; if (u.demoPref) app.demoPref = u.demoPref; if (u.trend) app.trend = u.trend; } catch (e) { } }
+function saveUi() { try { localStorage.setItem(LS_UI, JSON.stringify({ skin: app.skin, demoPref: app.demoPref, trend: app.trend, sleepMode: app.sleepMode })); } catch (e) { } }
+function loadUi() { try { const u = JSON.parse(localStorage.getItem(LS_UI) || '{}'); if (u.skin) app.skin = u.skin; if (u.demoPref) app.demoPref = u.demoPref; if (u.trend) app.trend = u.trend; if (['T', 'W', 'M', 'J'].includes(u.sleepMode)) app.sleepMode = u.sleepMode; } catch (e) { } }
 
 /* ---------- Datenquelle & Berechnung ---------- */
 function realHasData() { return Object.keys(app.real.days).length >= 2 || Object.keys(app.real.acts).length >= 2; }
@@ -771,9 +771,94 @@ function viewHeute() {
 }
 
 /* ---------- Ansicht: Schlaf ---------- */
+/* ---------- Schlafphasen-Übersicht (Tag / Woche / Monat / Jahr) ---------- */
+const SD_STAGES = [['awake', 'wach'], ['rem', 'REM'], ['light', 'Leicht'], ['deep', 'Tief']];
+const MONTHS = ['Jänner', 'Februar', 'März', 'April', 'Mai', 'Juni', 'Juli', 'August', 'September', 'Oktober', 'November', 'Dezember'];
+/** Eine Nacht in einheitliche Minuten zerlegen (COROS-Anteile beziehen sich auf die Gesamtzeit inkl. Wachzeit) */
+function sdNight(sl) {
+  if (!sl || !isNum(sl.mainMin)) return null;
+  const period = isNum(sl.periodMin) ? sl.periodMin : sl.mainMin + (isNum(sl.awakeMin) ? sl.awakeMin : 0);
+  const m = {};
+  const ps = ['deep', 'light', 'rem'].map(k => sl[k + 'Pct']);
+  for (const [k] of SD_STAGES) {
+    if (k === 'awake') { m[k] = isNum(sl.awakeMin) ? sl.awakeMin : isNum(sl.awakePct) ? sl.awakePct / 100 * period : null; continue; }
+    // Schlafphasen teilen sich die Schlafzeit im Verhältnis der COROS-Prozente
+    m[k] = ps.every(isNum) && sum(ps) > 0 ? sl[k + 'Pct'] / sum(ps) * sl.mainMin : isNum(sl[k + 'Min']) ? sl[k + 'Min'] : null;
+  }
+  if (!SD_STAGES.every(([k]) => isNum(m[k]))) return null;
+  return { asleep: sl.mainMin, period, m, score: sl.score, start: sl.start, end: sl.end, awakeCount: sl.awakeCount, napMin: sl.napMin };
+}
+/** Mittelwerte über mehrere Nächte; Anteile wie bei COROS aus der Summe der Phasen */
+function sdAgg(dates) {
+  const ns = dates.map(d => sdNight(((app.S.days[d] || {}).sleep))).filter(Boolean);
+  if (!ns.length) return null;
+  const out = { n: ns.length, asleep: mean(ns.map(x => x.asleep)), period: mean(ns.map(x => x.period)), m: {}, pct: {}, score: mean(ns.map(x => x.score)) };
+  const tot = {}; let all = 0;
+  for (const [k] of SD_STAGES) { const v = ns.map(x => x.m[k]); out.m[k] = mean(v); tot[k] = sum(v); all += tot[k]; }
+  for (const [k] of SD_STAGES) out.pct[k] = all ? tot[k] / all * 100 : null;
+  return out;
+}
+function sdPeriod(mode, anchor) {
+  const a = dateOf(anchor);
+  if (mode === 'W') { const wd = (a.getDay() + 6) % 7; const s = addDays(anchor, -wd); return { start: s, end: addDays(s, 6), label: fDM(s) + ' – ' + fDM(addDays(s, 6)), prevLabel: 'Ø Vorwoche' }; }
+  if (mode === 'M') { const s = ymd(new Date(a.getFullYear(), a.getMonth(), 1, 12)); const e = ymd(new Date(a.getFullYear(), a.getMonth() + 1, 0, 12)); return { start: s, end: e, label: MONTHS[a.getMonth()] + ' ' + a.getFullYear(), prevLabel: 'Ø Vormonat' }; }
+  if (mode === 'J') { const y = a.getFullYear(); return { start: y + '-01-01', end: y + '-12-31', label: String(y), prevLabel: 'Ø Vorjahr' }; }
+  return { start: anchor, end: anchor, label: relDay(anchor), prevLabel: '7-Tage-Ø' };
+}
+function sdShift(mode, anchor, dir) {
+  const a = dateOf(anchor);
+  if (mode === 'W') return addDays(anchor, 7 * dir);
+  if (mode === 'M') return ymd(new Date(a.getFullYear(), a.getMonth() + dir, 1, 12));
+  if (mode === 'J') return ymd(new Date(a.getFullYear() + dir, 0, 1, 12));
+  return addDays(anchor, dir);
+}
+const sdHM = min => { if (!isNum(min)) return '–'; let h = Math.floor(min / 60), m = Math.round(min - h * 60); if (m === 60) { h++; m = 0; } return h ? `${h}h ${m}min` : `${m}min`; };
+const sdBig = min => { if (!isNum(min)) return '<span class="sd-big">–</span>'; let h = Math.floor(min / 60), m = Math.round(min - h * 60); if (m === 60) { h++; m = 0; } return `<span class="sd-big num">${h}<small>h</small> ${m}<small>min</small></span>`; };
+function sleepDash() {
+  const mode = app.sleepMode || 'T'; const t = todayStr();
+  const anchor = mode === 'T' ? app.date : (app.sleepAnchor && app.sleepAnchor <= t ? app.sleepAnchor : app.date);
+  const P = sdPeriod(mode, anchor);
+  const end = P.end > t ? t : P.end;
+  const cur = mode === 'T' ? (() => { const n = sdNight((app.S.days[anchor] || {}).sleep); if (!n) return null; const all = sum(SD_STAGES.map(([k]) => n.m[k])); return { n: 1, asleep: n.asleep, period: n.period, m: n.m, pct: Object.fromEntries(SD_STAGES.map(([k]) => [k, SD_STAGES.every(([q]) => isNum(app.S.days[anchor].sleep[q + 'Pct'])) ? app.S.days[anchor].sleep[k + 'Pct'] : all ? n.m[k] / all * 100 : null])), score: n.score, night: n }; })() : sdAgg(dateRange(P.start, end));
+  const prevDates = mode === 'T' ? dateRange(addDays(anchor, -7), addDays(anchor, -1)) : (() => { const pp = sdPeriod(mode, sdShift(mode, P.start, -1)); return dateRange(pp.start, pp.end); })();
+  const ref = sdAgg(prevDates);
+  const canNext = sdShift(mode, mode === 'T' ? anchor : P.start, 1) <= t;
+  const navAct = mode === 'T' ? 'day' : 'sdshift';
+  let h = `<div class="seg sd-seg" role="group" aria-label="Zeitraum">${[['T', 'Tag'], ['W', 'Woche'], ['M', 'Monat'], ['J', 'Jahr']].map(([k, lbl]) => `<button data-act="sdmode" data-v="${k}" aria-pressed="${mode === k}" aria-label="${lbl}">${k}</button>`).join('')}</div>
+    <div class="sd-nav"><button data-act="${navAct}" data-v="-1" aria-label="Zurück">‹</button><span>${esc(P.label)}</span><button data-act="${navAct}" data-v="1" aria-label="Weiter" ${canNext ? '' : 'disabled'}>›</button></div>`;
+  if (!cur) return h + `<p class="faint small" style="padding:18px 0;text-align:center">${mode === 'T' ? 'Für diese Nacht hat COROS keine Schlafdaten.' : 'Keine Schlafdaten in diesem Zeitraum.'}</p>`;
+  h += `<div class="sd-tot"><div><div class="sd-l">Gesamtschlaf</div>${sdBig(cur.asleep)}</div><div class="sd-dim"><div class="sd-l">Gesamtzeit</div>${sdBig(cur.period)}</div>${mode === 'T' ? '' : `<div class="tiny faint" style="grid-column:1/-1;margin-top:-4px">Durchschnitt pro Nacht · ${cur.n} ${cur.n === 1 ? 'Nacht' : 'Nächte'} mit Daten</div>`}</div>`;
+  h += `<div class="sd-rows">${SD_STAGES.map(([k, lbl]) => {
+    const pct = cur.pct[k]; const rp = ref ? ref.pct[k] : null;
+    return `<div class="sd-row"><div class="row between"><span><span class="sd-name">${lbl}</span> <b class="sd-pct sd-${k} num">${isNum(pct) ? fmt(pct) + '%' : '–'}</b></span><span class="num sd-min">${sdHM(cur.m[k])}</span></div>
+      <div class="sd-track" role="img" aria-label="${lbl}: ${isNum(pct) ? fmt(pct) : '–'} Prozent${isNum(rp) ? ', ' + P.prevLabel + ' ' + fmt(rp) + ' Prozent' : ''}">${isNum(pct) ? `<span class="sd-fill sd-bg-${k}" style="width:${clamp(pct, 0.8, 100).toFixed(1)}%"></span>` : ''}${isNum(rp) ? `<i class="sd-mark" style="left:${clamp(rp, 0, 100).toFixed(1)}%"></i>` : ''}</div></div>`;
+  }).join('')}</div>`;
+  h += `<div class="sd-legend"><i class="sd-mark-l"></i>${esc(P.prevLabel)}${ref ? '' : ' <span class="faint">(noch keine Daten)</span>'}</div>`;
+  if (mode !== 'T') {
+    const days = dateRange(P.start, P.end);
+    const items = mode === 'J' ? Array.from({ length: 12 }, (_, i) => { const mp = sdPeriod('M', ymd(new Date(+P.start.slice(0, 4), i, 1, 12))); const ag = sdAgg(dateRange(mp.start, mp.end > t ? t : mp.end).filter(d => d >= mp.start)); return { x: MONTHS[i].slice(0, 3), y: ag ? ag.asleep / 60 : null, note: ag ? ag.n + ' Nächte' : '' }; })
+      : days.map(d => { const n = sdNight((app.S.days[d] || {}).sleep); return { x: d, y: n ? n.asleep / 60 : null }; });
+    h += `<div style="margin-top:16px">${queueChart(el => chartBars(el, items, { color: 'var(--sleep)', h: 150, yFmt: v => fmt(v, 0) + ' h', tipFmt: v => fmtHM(v * 60) + ' h Schlaf', empty: 'Keine Schlafdaten in diesem Zeitraum.', label: 'Schlafdauer je ' + (mode === 'J' ? 'Monat' : 'Nacht'), xFmt: mode === 'J' ? (v => v) : (mode === 'W' ? (v => DF.wd.format(dateOf(v))) : (v => String(+v.slice(8)))) }))}</div>`;
+  }
+  // Schlafdaten
+  const rows = mode === 'T' ? [
+    ['Schlafscore (COROS)', isNum(cur.score) ? fmt(cur.score) : '–'],
+    ['Schlaffenster', cur.night.start && cur.night.end ? cur.night.start.slice(11, 16) + ' – ' + cur.night.end.slice(11, 16) : '–'],
+    ['Wachphasen über 5 min', isNum(cur.night.awakeCount) ? fmt(cur.night.awakeCount) : '–'],
+    ['Nickerchen', isNum(cur.night.napMin) && cur.night.napMin > 0 ? sdHM(cur.night.napMin) : 'keine']
+  ] : [
+    ['Nächte mit Daten', fmt(cur.n)],
+    ['Ø Schlafscore (COROS)', isNum(cur.score) ? fmt(cur.score) : '–'],
+    ['Ø Wachzeit pro Nacht', sdHM(cur.m.awake)]
+  ];
+  h += `<div class="eyebrow" style="margin:18px 0 4px">Schlafdaten</div><div class="metrics">${rows.map(r => `<div class="metric"><div class="ml"><div class="t">${esc(r[0])}</div></div><div></div><div class="mv" style="font-size:16px">${esc(r[1])}</div></div>`).join('')}</div>`;
+  h += `<p class="tiny faint" style="margin-top:10px">Prozentwerte von COROS; Minuten daraus berechnet und deshalb auf wenige Minuten genau. Den genauen Phasenverlauf über die Nacht gibt COROS über die Verbindung nicht heraus.</p>`;
+  return h;
+}
 function viewSchlaf() {
   const d = app.date, A = app.A, r = A.D[d] || {}, x = app.S.days[d] || {}, sl = x.sleep || {};
   let h = bannerHtml();
+  h += `<section class="card sd">${'<div class="card-h"><h2>Schlafphasen</h2></div>'}${sleepDash()}</section>`;
   const debt = isNum(r.sleepMin) ? Math.max(0, r.need - r.sleepMin) : null;
   h += `<section class="card"><div class="row" style="gap:18px;align-items:center">
     <div style="width:132px;flex:none">${ring({ frac: (r.sleepPerf || 0) / 100, color: 'var(--sleep)', value: isNum(r.sleepPerf) ? fmt(r.sleepPerf) : '–', unit: isNum(r.sleepPerf) ? '% Leistung' : '', label: 'Schlafleistung' })}</div>
@@ -783,7 +868,6 @@ function viewSchlaf() {
       ${isNum(sl.napMin) && sl.napMin > 0 ? `<div class="small faint">inkl. ${fmtDur(sl.napMin)} Nickerchen</div>` : ''}
     </div></div></section>`;
   h += `<div class="grid2">`;
-  h += card('Schlafphasen', stagesBar(sl));
   const kv = [
     ['Konsistenz', isNum(r.consistency) ? fmt(r.consistency) : '–', '%', 'Schlafzeiten der letzten 4 Nächte'],
     ['Effizienz', isNum(r.efficiency) ? fmt(r.efficiency) : '–', '%', 'Schlafzeit / Zeit im Bett'],
@@ -1390,6 +1474,8 @@ document.addEventListener('click', async ev => {
     case 'sub': openSub(v); break;
     case 'back': app.sub = null; app.view = 'mehr'; setHash('mehr'); render(); break;
     case 'scroll': { const el = document.getElementById(v); if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' }); break; }
+    case 'sdmode': app.sleepMode = v; if (v !== 'T') app.sleepAnchor = app.date; saveUi(); render(); break;
+    case 'sdshift': { const mo = app.sleepMode || 'T'; const nd = sdShift(mo, sdPeriod(mo, app.sleepAnchor || app.date).start, +v); if (nd <= todayStr()) { app.sleepAnchor = nd; render(); } break; }
     case 'day': { const nd = addDays(app.date, +v); if (nd <= todayStr()) { app.date = nd; render(); } break; }
     case 'sync': sync('quick'); break;
     case 'history': sync('history'); break;
