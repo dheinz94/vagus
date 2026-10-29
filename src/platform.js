@@ -312,22 +312,22 @@ const Sync = {
 function asObj(r) { const p = r && (r.payload != null ? r.payload : r.structuredContent); if (p && typeof p === 'object') return p; try { return JSON.parse(p); } catch (e) { return {}; } }
 
 /* ---------- Was abgeglichen wird: Tagebuch + eigene Profilangaben ---------- */
-const SYNC_PROFILE = ['birthday', 'sex', 'heightCm', 'weightKg', 'hrMax', 'leanPct', 'sleepBaseMin', 'wakeTime', 'strengthCodes'];
+const SYNC_PROFILE = ['birthday', 'sex', 'heightCm', 'weightKg', 'hrMax', 'smoking', 'sleepBaseMin', 'wakeTime', 'strengthCodes'];
 function buildSyncData() {
   const R = app.real; const P = R.profile || {}; const man = P._manual || {}; const ts = P._ts || {};
   const profile = {};
   for (const k of SYNC_PROFILE) if (man[k]) profile[k] = { v: P[k] === undefined ? null : P[k], at: ts[k] || 1 };
   const journal = {};
-  for (const [d, e] of Object.entries(R.journal || {})) if (e) journal[d] = { items: e.items || {}, note: e.note || '', _at: e._at || 1 };
+  for (const [d, e] of Object.entries(R.journal || {})) if (e) journal[d] = { items: e.items || {}, note: e.note || '', drinks: isNum(e.drinks) ? e.drinks : 0, _at: e._at || 1 };
   return { v: 1, journal, profile };
 }
-function sameSyncData(a, b) { const n = o => JSON.stringify({ j: Object.keys(o.journal || {}).sort().map(k => [k, o.journal[k]._at, o.journal[k].items, o.journal[k].note]), p: Object.keys(o.profile || {}).sort().map(k => [k, o.profile[k].at, o.profile[k].v]) }); return n(a) === n(b); }
+function sameSyncData(a, b) { const n = o => JSON.stringify({ j: Object.keys(o.journal || {}).sort().map(k => [k, o.journal[k]._at, o.journal[k].items, o.journal[k].note, o.journal[k].drinks || 0]), p: Object.keys(o.profile || {}).sort().map(k => [k, o.profile[k].at, o.profile[k].v]) }); return n(a) === n(b); }
 function mergeSyncData(rem) {
   if (!rem) return false;
   const R = app.real; let changed = false;
   for (const [d, e] of Object.entries(rem.journal || {})) {
     const l = R.journal[d];
-    if (!l || (e._at || 0) > (l._at || 0) || ((e._at || 0) === (l._at || 0) && JSON.stringify([e.items, e.note]) > JSON.stringify([l.items, l.note]))) { R.journal[d] = { items: Object.assign({}, e.items), note: e.note || '', _at: e._at || 1 }; store.markJournal(d); changed = true; }
+    if (!l || (e._at || 0) > (l._at || 0) || ((e._at || 0) === (l._at || 0) && JSON.stringify([e.items, e.note, e.drinks || 0]) > JSON.stringify([l.items, l.note, l.drinks || 0]))) { R.journal[d] = { items: Object.assign({}, e.items), note: e.note || '', drinks: isNum(e.drinks) ? clamp(e.drinks, 0, 30) : 0, _at: e._at || 1 }; store.markJournal(d); changed = true; }
   }
   const P = R.profile || (R.profile = {}); P._manual = Object.assign({}, P._manual); P._ts = Object.assign({}, P._ts);
   for (const [k, o] of Object.entries(rem.profile || {})) {

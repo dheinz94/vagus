@@ -594,10 +594,11 @@ function analyze(S, opts = {}) {
     let tAct = 0, exSteps = 0;
     r.acts = list.map(a => {
       const t = actTrimp(a, hrRest, P);
-      const zones = a.zones || zonesFromAvg(a.durMin, a.avgHr, P.hrMax);
+      const lz = lapZones(a.laps, P.hrMax);
+      const zones = lz || a.zones || zonesFromAvg(a.durMin, a.avgHr, P.hrMax);
       tAct += t || 0;
       if (isFootSport(a) && isNum(a.durMin)) exSteps += a.durMin * (a.sport === 104 || a.sport === 105 || a.sport === 900 || /geh|walk|wander|hike/i.test(a.name || '') ? 105 : 150);
-      return { ...a, trimp: t, strain: strainOf(t), zonesUsed: zones, zonesEstimated: !a.zones, strength: isStrength(a, P.strengthCodes) };
+      return { ...a, trimp: t, strain: strainOf(t), zonesUsed: zones, zonesEstimated: !lz && !a.zones, lapZonesUsed: lz, strength: isStrength(a, P.strengthCodes) };
     });
     const steps = isNum(x.steps) ? x.steps : null;
     const hasDayData = steps != null || list.length || x.sleep || isNum(x.rhr);
@@ -680,25 +681,60 @@ const SHRINK = 0.6;       // Überlappung der Faktoren (nicht unabhängig)
 const VO2_MED = { m: [[25, 48.0], [35, 42.4], [45, 37.8], [55, 32.6], [65, 28.2], [75, 24.4]], f: [[25, 37.6], [35, 30.2], [45, 26.7], [55, 23.4], [65, 20.0], [75, 18.3]] };
 function linPts(pts, x) { if (x <= pts[0][0]) return pts[0][1]; for (let i = 1; i < pts.length; i++) if (x <= pts[i][0]) { const [x0, y0] = pts[i - 1], [x1, y1] = pts[i]; return y0 + (x - x0) / (x1 - x0) * (y1 - y0); } return pts[pts.length - 1][1]; }
 function vo2Median(age, sex) { const a = age || 30; if (sex === 'm' || sex === 'f') return linPts(VO2_MED[sex], a); return (linPts(VO2_MED.m, a) + linPts(VO2_MED.f, a)) / 2; }
+/* Bio-Alter: 12 Faktoren. src 'coros' = von der Uhr gemessen, 'manual' = vom Nutzer eingetragen */
+const HRV_MED = [[20, 72], [30, 62], [40, 50], [50, 41], [60, 34], [70, 29], [80, 26]]; // typische nächtliche HRV (ms) nach Alter
+const SMOKING = {
+  never: { label: 'Nie geraucht', hr: 1.0 }, former10: { label: 'Früher, aufgehört vor 10+ Jahren', hr: 1.08 },
+  former5: { label: 'Früher, aufgehört vor 5–10 Jahren', hr: 1.25 }, former0: { label: 'Früher, aufgehört vor < 5 Jahren', hr: 1.45 },
+  nicotine: { label: 'Nur E-Zigarette, Snus oder Pouches', hr: 1.15 }, occasional: { label: 'Gelegentlich', hr: 1.6 }, daily: { label: 'Täglich', hr: 2.8 }
+};
 const HS_METRICS = [
-  { key: 'consistency', group: 'Schlaf', label: 'Schlafkonsistenz', unit: '%', dec: 0, pts: [[30, 1.45], [45, 1.25], [60, 1.08], [70, 1.0], [80, 0.95], [90, 0.91], [100, 0.90]], target: '≥ 80 %', src: 'Windred et al., Sleep 2024 (UK Biobank)' },
-  { key: 'sleepH', group: 'Schlaf', label: 'Schlafdauer', unit: 'h', dec: 1, pts: [[4.5, 1.25], [5.5, 1.14], [6.5, 1.05], [7, 1.0], [8, 1.0], [8.5, 1.04], [9.5, 1.18], [10.5, 1.32]], target: '7–8 h', src: 'Cappuccio et al., Sleep 2010 (Meta-Analyse)' },
-  { key: 'z13', group: 'Belastung', label: 'Zeit in Zone 1–3', unit: 'min/Woche', dec: 0, pts: [[0, 1.30], [60, 1.12], [150, 1.0], [300, 0.90], [450, 0.87], [700, 0.86]], target: '150–300 min/Woche', src: 'Lee et al., Circulation 2022' },
-  { key: 'z45', group: 'Belastung', label: 'Zeit in Zone 4–5', unit: 'min/Woche', dec: 0, pts: [[0, 1.10], [30, 1.0], [75, 0.92], [150, 0.86], [300, 0.84]], target: '≥ 75 min/Woche', src: 'Lee et al., Circulation 2022' },
-  { key: 'strength', group: 'Belastung', label: 'Krafttraining', unit: 'min/Woche', dec: 0, pts: [[0, 1.06], [30, 0.93], [60, 0.89], [120, 0.90], [180, 0.94], [300, 0.98]], target: '60–120 min/Woche', src: 'Momma et al., Br J Sports Med 2022' },
-  { key: 'steps', group: 'Belastung', label: 'Schritte', unit: 'pro Tag', dec: 0, pts: [[2000, 1.55], [4000, 1.30], [7000, 1.0], [10000, 0.85], [12500, 0.79], [16000, 0.77]], target: '≥ 8 000 pro Tag', src: 'Paluch et al., Lancet Public Health 2022' },
-  { key: 'vo2', group: 'Fitness', label: 'VO₂max', unit: 'ml/kg/min', dec: 1, target: 'über Altersmedian', src: 'Kodama et al., JAMA 2009' },
-  { key: 'rhr', group: 'Fitness', label: 'Ruhepuls', unit: 'bpm', dec: 0, target: '≤ 55 bpm', src: 'Zhang et al., CMAJ 2016' },
-  { key: 'lean', group: 'Fitness', label: 'Magermasse', unit: '%', dec: 0, target: 'über Median', src: 'Srikanthan & Karlamangla, Am J Med 2014' }
+  { key: 'sleepH', group: 'Schlaf & Erholung', input: 'coros', label: 'Schlafdauer', unit: 'h', dec: 1, pts: [[4.5, 1.25], [5.5, 1.14], [6.5, 1.05], [7, 1.0], [8, 1.0], [8.5, 1.04], [9.5, 1.18], [10.5, 1.32]], target: '7–8 h', src: 'Cappuccio et al., Sleep 2010 (Meta-Analyse)' },
+  { key: 'consistency', group: 'Schlaf & Erholung', input: 'coros', label: 'Schlafkonsistenz', unit: '%', dec: 0, pts: [[30, 1.45], [45, 1.25], [60, 1.08], [70, 1.0], [80, 0.95], [90, 0.91], [100, 0.90]], target: '≥ 80 %', src: 'Windred et al., Sleep 2024 (UK Biobank)' },
+  { key: 'hrv', group: 'Schlaf & Erholung', input: 'coros', label: 'HRV in der Nacht', unit: 'ms', dec: 0, target: 'über Altersmedian', src: 'Hillebrand et al., Europace 2013 (Meta-Analyse); Altersnormen aus Wearable-Daten – vorsichtig gewichtet' },
+  { key: 'rhr', group: 'Schlaf & Erholung', input: 'coros', label: 'Ruhepuls', unit: 'bpm', dec: 0, target: '≤ 55 bpm', src: 'Zhang et al., CMAJ 2016' },
+  { key: 'steps', group: 'Bewegung', input: 'coros', label: 'Schritte', unit: 'pro Tag', dec: 0, pts: [[2000, 1.55], [4000, 1.30], [7000, 1.0], [10000, 0.85], [12500, 0.79], [16000, 0.77]], target: '≥ 8 000 pro Tag', src: 'Paluch et al., Lancet Public Health 2022' },
+  { key: 'active', group: 'Bewegung', input: 'coros', label: 'Aktive Minuten', unit: 'min/Woche', dec: 0, pts: [[0, 1.30], [60, 1.12], [150, 1.0], [300, 0.88], [450, 0.84], [700, 0.83]], target: '150–300 min/Woche', src: 'Lee et al., Circulation 2022' },
+  { key: 'intense', group: 'Bewegung', input: 'coros', label: 'Intensive Minuten (Zone 4–5)', unit: 'min/Woche', dec: 0, pts: [[0, 1.10], [30, 1.0], [75, 0.92], [150, 0.86], [300, 0.84]], target: '≥ 75 min/Woche', src: 'Lee et al., Circulation 2022' },
+  { key: 'strength', group: 'Bewegung', input: 'coros', label: 'Krafttraining', unit: 'min/Woche', dec: 0, pts: [[0, 1.06], [30, 0.93], [60, 0.89], [120, 0.90], [180, 0.94], [300, 0.98]], target: '60–120 min/Woche', src: 'Momma et al., Br J Sports Med 2022' },
+  { key: 'vo2', group: 'Fitness & Körper', input: 'coros', label: 'VO₂max', unit: 'ml/kg/min', dec: 1, target: 'über Altersmedian', src: 'Kodama et al., JAMA 2009' },
+  { key: 'bmi', group: 'Fitness & Körper', input: 'coros', label: 'BMI', unit: 'kg/m²', dec: 1, pts: [[17, 1.7], [18.5, 1.5], [20, 1.06], [22.5, 1.0], [25, 1.0], [26.2, 1.07], [28.7, 1.2], [32.5, 1.45], [37.5, 1.94], [42, 2.6]], target: '20–25', src: 'Global BMI Mortality Collaboration, Lancet 2016 – unterscheidet nicht zwischen Muskeln und Fett' },
+  { key: 'alcohol', group: 'Lebensstil', input: 'manual', label: 'Alkohol', unit: 'Getränke/Woche', dec: 1, pts: [[0, 1.0], [10, 1.0], [15, 1.07], [27.5, 1.24], [45, 1.89], [70, 2.4]], target: '≤ 10 Getränke/Woche (1 Getränk = 10 g Alkohol)', src: 'Wood et al., Lancet 2018 (599 912 Personen)' },
+  { key: 'smoking', group: 'Lebensstil', input: 'manual', label: 'Rauchen / Nikotin', unit: '', dec: 0, target: 'rauchfrei', src: 'Jha et al., NEJM 2013; Inoue-Choi et al., JAMA Intern Med 2017' }
 ];
+const HS_GROUPS = ['Schlaf & Erholung', 'Bewegung', 'Fitness & Körper', 'Lebensstil'];
+function hrvMedian(age) { return linPts(HRV_MED, age || 30); }
 function metricHR(m, v, ctx) {
+  if (m.key === 'smoking') return v && SMOKING[v] ? SMOKING[v].hr : null;
   if (!isNum(v)) return null;
   if (m.pts) return lerpPts(m.pts, v);
   if (m.key === 'vo2') return clamp(Math.pow(0.87, (v - vo2Median(ctx.age, ctx.sex)) / 3.5), 0.35, 2.2);
   if (m.key === 'rhr') return clamp(Math.pow(1.10, (v - 60) / 10), 0.7, 1.8);
-  if (m.key === 'lean') { const med = ctx.sex === 'f' ? 68 : ctx.sex === 'm' ? 78 : 73; return clamp(Math.pow(0.98, v - med), 0.6, 1.6); }
+  if (m.key === 'hrv') return clamp(Math.pow(1.30, -Math.log2(v / hrvMedian(ctx.age))), 0.85, 1.5);
   return null;
 }
+/** Minuten je Pulszone aus den Runden einer Aktivität ([[Sekunden, Ø-Puls], …]) */
+function lapZones(laps, hrMax) {
+  if (!Array.isArray(laps) || !laps.length || !isNum(hrMax)) return null;
+  const z = [0, 0, 0, 0, 0, 0]; let n = 0; // Index 5 = unter Zone 1
+  for (const l of laps) {
+    const sec = l[0], hr = l[1]; if (!isNum(sec) || !isNum(hr) || hr <= 0 || sec <= 0) continue;
+    const f = hr / hrMax; const i = f >= 0.9 ? 4 : f >= 0.8 ? 3 : f >= 0.7 ? 2 : f >= 0.6 ? 1 : f >= 0.5 ? 0 : 5;
+    z[i] += sec / 60; n++;
+  }
+  return n ? z.slice(0, 5).map(v => Math.round(v * 10) / 10) : null;
+}
+/** Runden aus queryActivityLapData → [[Sekunden, Ø-Puls]] (erste Gruppe mit Pulswerten) */
+function parseLaps(raw) {
+  let j = raw; if (typeof j === 'string') { try { j = JSON.parse(unwrapText(j)); } catch (e) { return null; } }
+  const groups = j && Array.isArray(j.lapGroups) ? j.lapGroups : null; if (!groups) return null;
+  for (const g of groups) {
+    const laps = (g && Array.isArray(g.laps) ? g.laps : []).map(l => [parseNum(l.time), parseNum(l.avgHr)]).filter(l => isNum(l[0]) && l[0] > 0 && isNum(l[1]) && l[1] > 0);
+    if (laps.length) return laps.map(l => [Math.round(l[0] * 10) / 10, Math.round(l[1])]);
+  }
+  return [];
+}
+function drinksOf(e) { if (!e) return 0; if (isNum(e.drinks)) return e.drinks; return 0; }
 function healthspanWindow(S, A, endDate, windowDays) {
   const start = addDays(endDate, -(windowDays - 1));
   const ds = A.dates.filter(d => d >= start && d <= endDate);
@@ -707,29 +743,38 @@ function healthspanWindow(S, A, endDate, windowDays) {
   if (!withData.length) return null;
   const spanDays = Math.max(7, diffDays(endDate, withData[0]) + 1);
   const weeks = Math.min(windowDays, spanDays) / 7;
-  let z13 = 0, z45 = 0, strength = 0, actMin = 0, zMin = 0;
+  // Intensive Minuten nur aus echten Rundendaten; Abdeckung über Ausdauer-Aktivitäten
+  let intense = 0, strength = 0, cardioMin = 0, lapMin = 0, cardioN = 0, cardioNoDur = 0;
   for (const d of ds) for (const a of (A.D[d] ? A.D[d].acts : [])) {
-    const z = a.zonesUsed; const dm = isNum(a.durMin) ? a.durMin : (z ? sum(z) : 0);
-    actMin += dm;
-    if (z) { z13 += z[0] + z[1] + z[2]; z45 += z[3] + z[4]; zMin += dm; }
-    if (a.strength && isNum(a.durMin)) strength += a.durMin;
+    if (a.strength) { if (isNum(a.durMin)) strength += a.durMin; continue; }
+    cardioN++; if (!isNum(a.durMin)) cardioNoDur++;
+    const dm = isNum(a.durMin) ? a.durMin : 0; cardioMin += dm;
+    if (a.lapZonesUsed) { intense += a.lapZonesUsed[3] + a.lapZonesUsed[4]; lapMin += dm; }
   }
-  const cov = actMin ? zMin / actMin : 0; // Anteil der Trainingszeit mit Pulsdaten
-  // VO₂max: letzter Wert bis zum Stichtag; davor gilt der früheste bekannte Wert (sonst springt der Verlauf künstlich)
+  const cov = cardioMin ? lapMin / cardioMin : (cardioN === 0 ? 1 : 0);
+  // heutiger Tag ist noch nicht vorbei → nicht in den Wochenschnitt der aktiven Minuten
+  const exDays = ds.filter(d => d !== todayStr()).filter(d => isNum((days[d] || {}).exerciseMin));
   const fh = (S.fitnessHist || []).filter(f => isNum(f.vo2max)).sort((a, b) => String(a.date).localeCompare(String(b.date)));
   const before = fh.filter(f => f.date <= endDate);
   const vo2 = before.length ? before[before.length - 1].vo2max : fh.length ? fh[0].vo2max : (S.fitness && isNum(S.fitness.vo2max) ? S.fitness.vo2max : null);
-  const values = {
-    consistency: mean(ds.map(d => A.D[d].consistency)),
-    sleepH: (() => { const m = mean(ds.map(d => A.D[d].sleepMin)); return m != null ? m / 60 : null; })(),
-    z13: weeks && cov >= 0.5 ? z13 / cov / weeks : null, z45: weeks && cov >= 0.5 ? z45 / cov / weeks : null, strength: weeks ? strength / weeks : null,
-    steps: mean(ds.map(d => (days[d] || {}).steps)),
-    vo2, rhr: mean(ds.map(d => (days[d] || {}).rhr)),
-    lean: isNum((S.profile || {}).leanPct) ? S.profile.leanPct : null
-  };
-  // Ohne Aktivitäts- oder Schrittdaten keine Zonenaussage
+  const P = S.profile || {};
+  const bmi = isNum(P.heightCm) && isNum(P.weightKg) && P.heightCm > 100 ? P.weightKg / Math.pow(P.heightCm / 100, 2) : null;
+  // Alkohol: nur echte Einträge; Tage ohne Eintrag zählen als 0
+  let drinks = 0; for (const d of ds) if (d >= withData[0]) drinks += drinksOf((S.journal || {})[d]);
   const hasActs = ds.some(d => (A.actsBy[d] || []).length);
-  if (!hasActs) { values.z13 = null; values.z45 = null; values.strength = null; }
+  const values = {
+    sleepH: (() => { const m = mean(ds.map(d => A.D[d].sleepMin)); return m != null ? m / 60 : null; })(),
+    consistency: mean(ds.map(d => A.D[d].consistency)),
+    hrv: mean(ds.map(d => (days[d] || {}).hrv)),
+    rhr: mean(ds.map(d => (days[d] || {}).rhr)),
+    steps: mean(ds.map(d => (days[d] || {}).steps)),
+    active: exDays.length >= 5 ? mean(exDays.map(d => days[d].exerciseMin)) * 7 : null,
+    intense: hasActs ? (cardioN === 0 ? 0 : cardioNoDur === cardioN && !lapMin ? null : cov >= 0.8 ? intense / weeks : null) : null,
+    strength: hasActs ? strength / weeks : null,
+    vo2, bmi,
+    alcohol: weeks ? drinks / weeks : null,
+    smoking: P.smoking || null
+  };
   const ctx = { age: A.P.age, sex: A.P.sex };
   const metrics = HS_METRICS.map(m => {
     const v = values[m.key]; const hr = metricHR(m, v, ctx);
@@ -737,7 +782,7 @@ function healthspanWindow(S, A, endDate, windowDays) {
     return { ...m, value: v, hr, years };
   });
   const total = clamp(sum(metrics.map(m => m.years)), -18, 18);
-  return { metrics, delta: total, nDays: withData.length, start, end: endDate };
+  return { metrics, delta: total, nDays: withData.length, start, end: endDate, lapCoverage: cov };
 }
 function healthspan(S, A) {
   const end = A.today;
@@ -795,7 +840,8 @@ function journalInsights(S, A) {
       const x = (S.days || {})[addDays(d, 1)] || {};
       const hrvRel = isNum(x.hrv) && nxt.hrvBase ? (x.hrv / nxt.hrvBase - 1) * 100 : null;
       const sp = nxt.sleepPerf;
-      if (e.items[b.id] === true) { yes.push(nxt.recovery); hy.push(hrvRel); sy.push(sp); } else { no.push(nxt.recovery); hn.push(hrvRel); sn.push(sp); }
+      const on = b.id === 'alcohol' ? (e.items.alcohol === true || drinksOf(e) > 0) : e.items[b.id] === true;
+      if (on) { yes.push(nxt.recovery); hy.push(hrvRel); sy.push(sp); } else { no.push(nxt.recovery); hn.push(hrvRel); sn.push(sp); }
     }
     if (yes.length >= 3 && no.length >= 3) {
       out.push({ ...b, nYes: yes.length, nNo: no.length, effect: mean(yes) - mean(no), hrvEffect: (mean(hy) != null && mean(hn) != null) ? mean(hy) - mean(hn) : null, sleepEffect: (mean(sy) != null && mean(sn) != null) ? mean(sy) - mean(sn) : null, yesMean: mean(yes), noMean: mean(no) });
@@ -823,7 +869,7 @@ function periodStats(S, A, end, n) {
 /* ---------- Beispieldaten ---------- */
 function makeDemo(endDate) {
   const r = rng(20261020);
-  const S = { profile: { birthday: '1999-03-14', sex: 'm', heightCm: 181, weightKg: 76, leanPct: 80, sleepBaseMin: 470, wakeTime: '07:00', strengthCodes: [402] }, days: {}, acts: {}, journal: {}, fitness: null, fitnessHist: [], demo: true };
+  const S = { profile: { birthday: '1999-03-14', sex: 'm', heightCm: 181, weightKg: 76, smoking: 'never', sleepBaseMin: 470, wakeTime: '07:00', strengthCodes: [402] }, days: {}, acts: {}, journal: {}, fitness: null, fitnessHist: [], demo: true };
   const N = 180;
   let prevStrainHigh = 0, prevAlcohol = false;
   for (let i = N - 1; i >= 0; i--) {
@@ -858,7 +904,8 @@ function makeDemo(endDate) {
     const acts = [];
     const add = (sport, name, dur, hr, dist, hh) => {
       const id = 'demo-' + compact(d) + '-' + acts.length;
-      acts.push({ id, sport, name, date: d, start: d + 'T' + hh, durMin: Math.round(dur), avgHr: Math.round(hr), maxHr: Math.round(hr + 18 + r() * 8), distKm: dist ? Math.round(dist * 100) / 100 : undefined, kcal: Math.round(dur * (hr - 50) * 0.11), src: 'demo' });
+      const laps = []; if (sport !== 402) { let left = dur * 60; while (left > 30) { const t = Math.min(left, 330 + r() * 60); laps.push([Math.round(t), Math.round(hr + gauss(r) * 7)]); left -= t; } }
+      acts.push({ id, sport, name, date: d, start: d + 'T' + hh, laps: laps.length ? laps : undefined, durMin: Math.round(dur), avgHr: Math.round(hr), maxHr: Math.round(hr + 18 + r() * 8), distKm: dist ? Math.round(dist * 100) / 100 : undefined, kcal: Math.round(dur * (hr - 50) * 0.11), src: 'demo' });
     };
     if (!sick && r() > 0.12) {
       if (dow === 1 || dow === 4) add(402, 'Krafttraining', 45 + r() * 20, 108 + gauss(r) * 6, null, '18:10');
@@ -871,11 +918,11 @@ function makeDemo(endDate) {
     for (const a of acts) S.acts[a.id] = clean(a);
     const steps = Math.round(clamp(7200 + gauss(r) * 2200 + acts.reduce((s, a) => s + ((a.sport === 100 ? 160 : a.sport === 104 ? 110 : 0) * a.durMin), 0) - (sick ? 4000 : 0), 1500, 32000));
     const stress = Math.round(clamp(31 + gauss(r) * 7 + (dow >= 1 && dow <= 4 ? 4 : -4) + (sick ? 10 : 0), 8, 80));
-    S.days[d] = { date: d, sleep, hrv, rhr, resp, spo2: Math.round(96 + r() * 3), steps, stress, kcal: Math.round(2100 + steps * 0.04), src: 'demo' };
+    S.days[d] = { date: d, sleep, hrv, rhr, resp, spo2: Math.round(96 + r() * 3), steps, stress, exerciseMin: acts.reduce((s2, a) => s2 + a.durMin, 0), kcal: Math.round(2100 + steps * 0.04), src: 'demo' };
     // Tagebuch (Abend von d)
     const alc = (dow === 5 || dow === 6) ? r() < 0.4 : r() < 0.06;
     if (r() < 0.72) {
-      S.journal[d] = { items: { alcohol: alc, lateCaffeine: r() < 0.2, screens: r() < 0.45, highStress: r() < 0.25, meditation: r() < 0.3, sauna: r() < 0.08, reading: r() < 0.35, hydrated: r() < 0.7, daylight: r() < 0.5, sick }, note: '' };
+      S.journal[d] = { drinks: alc ? 1 + Math.floor(r() * 4) : 0, items: { alcohol: alc, lateCaffeine: r() < 0.2, screens: r() < 0.45, highStress: r() < 0.25, meditation: r() < 0.3, sauna: r() < 0.08, reading: r() < 0.35, hydrated: r() < 0.7, daylight: r() < 0.5, sick }, note: '' };
     }
     prevAlcohol = alc;
     const tr = acts.reduce((s, a) => s + a.durMin * clamp((a.avgHr - 52) / (192 - 52), 0, 1), 0);
@@ -883,7 +930,7 @@ function makeDemo(endDate) {
     if (i % 7 === 0) S.fitnessHist.push({ date: d, vo2max: Math.round((50.5 + 2.5 * prog + gauss(r) * 0.3) * 10) / 10 });
   }
   // Demo-Tag "heute" bewusst gut erholt darstellen
-  const lastD = S.days[endDate]; if (lastD) { lastD.hrv = 74; lastD.rhr = 49; lastD.resp = 14.5; if (S.journal[addDays(endDate, -1)]) S.journal[addDays(endDate, -1)].items.alcohol = false; }
+  const lastD = S.days[endDate]; if (lastD) { lastD.hrv = 74; lastD.rhr = 49; lastD.resp = 14.5; if (S.journal[addDays(endDate, -1)]) { S.journal[addDays(endDate, -1)].items.alcohol = false; S.journal[addDays(endDate, -1)].drinks = 0; } }
   S.fitness = { date: endDate, vo2max: S.fitnessHist[S.fitnessHist.length - 1].vo2max, runLevel: 74.2, thresholdHr: 171, thresholdPace: '4:28 /km', predictions: { '5 km': '21:05', '10 km': '43:58', 'Halbmarathon': '1:37:40', 'Marathon': '3:26:15' } };
   S.load = { acute: null, chronic: null };
   S.corosRecovery = { pct: 82, level: 'Gut erholt', full: '6 h' };
@@ -895,5 +942,5 @@ if (typeof module !== 'undefined') module.exports = {
   unwrapText, parseSeries, localOf, listVal,
   ymd, dateOf, addDays, diffDays, dateRange, parseDurMin, parseNum, pctOf, findDate, parseText, jsonToRecords, parseResult,
   normSleep, normHrv, normDaily, normCheck, normRecovery, normFitness, normLoad, normUser, normActivity, normSingle,
-  analyze, healthspan, journalInsights, periodStats, makeDemo, zonesFromAvg, trimp, strainOf, vo2Median, HS_METRICS, ageOn
+  analyze, healthspan, lapZones, parseLaps, HS_GROUPS, drinksOf, SMOKING, hrvMedian, journalInsights, periodStats, makeDemo, zonesFromAvg, trimp, strainOf, vo2Median, HS_METRICS, ageOn
 };

@@ -213,7 +213,7 @@ function baseStats(key, d, n = 30) {
 
 /* ---------- COROS-Anbindung ---------- */
 const FATAL = new Set(['coros_login', 'network_blocked', 'oauth_failed', 'needs_reauth', 'server_not_connected', 'selection_required', 'server_not_found', 'not_in_manifest', 'blocked_by_policy', 'approval_required', 'not_granted', 'capability_disabled', 'capability_removed', 'consent_required', 'user_changed', 'cancelled', 'no_mcp']);
-const TOOL_NAMES = ['queryUserInfo', 'querySleepOverview', 'querySleepHrv', 'queryTrainingSchedule', 'queryRestingHeartRate', 'queryDailyHealthData', 'queryAvgHeartRate', 'queryStressLevel', 'queryStressTimeSeries', 'queryHealthCheckTimeSeries', 'queryRecoveryStatus', 'queryFitnessAssessmentOverview', 'queryTrainingLoadAssessment', 'querySportRecords', 'getActivityDetail', 'queryDevices'];
+const TOOL_NAMES = ['queryUserInfo', 'querySleepOverview', 'querySleepHrv', 'queryTrainingSchedule', 'queryRestingHeartRate', 'queryDailyHealthData', 'queryAvgHeartRate', 'queryStressLevel', 'queryStressTimeSeries', 'queryHealthCheckTimeSeries', 'queryRecoveryStatus', 'queryFitnessAssessmentOverview', 'queryTrainingLoadAssessment', 'querySportRecords', 'getActivityDetail', 'queryActivityLapData', 'queryDevices'];
 const CONN_COPY = {
   server_not_connected: ['COROS ist in deinem Claude-Konto noch nicht verbunden.', 'Füge den COROS-Konnektor einmalig hinzu und melde dich mit deinem COROS-Konto an. Danach hier auf „Mit COROS verbinden“ tippen.'],
   needs_reauth: ['Die COROS-Anmeldung ist abgelaufen.', 'Öffne in Claude Einstellungen → Konnektoren → COROS und verbinde neu.'],
@@ -405,7 +405,7 @@ async function fetchActivities(span) {
       if (!a.date) continue;
       if (!a.id) a.id = 'gen-' + compact(a.date) + '-' + (a.start || '').slice(11, 16).replace(':', '') + '-' + (a.sport || 0) + '-' + Math.round(a.durMin || 0);
       const old = app.real.acts[a.id] || {};
-      app.real.acts[a.id] = Object.assign({}, a, old.detailed ? { avgHr: old.avgHr ?? a.avgHr, maxHr: old.maxHr, kcal: old.kcal ?? a.kcal, load: old.load, zones: old.zones, te: old.te, ate: old.ate, focus: old.focus, effort: old.effort, detailed: true } : {}, { src: 'coros' });
+      app.real.acts[a.id] = Object.assign({}, a, old.detailed ? { avgHr: old.avgHr ?? a.avgHr, maxHr: old.maxHr, kcal: old.kcal ?? a.kcal, load: old.load, zones: old.zones, te: old.te, ate: old.ate, focus: old.focus, effort: old.effort, pace: old.pace, speed: old.speed, detailed: true } : {}, old.laps !== undefined ? { laps: old.laps } : {}, old.lapTries ? { lapTries: old.lapTries } : {}, old.detailTries ? { detailTries: old.detailTries } : {}, { src: 'coros' });
       app.real.acts[a.id] = clean(app.real.acts[a.id]); app.real.acts[a.id]._at = Date.now();
       store.markDay(a.date);
     }
@@ -414,11 +414,14 @@ async function fetchActivities(span) {
   }
 }
 async function fetchDetails(max) {
-  const list = Object.values(app.real.acts).filter(a => !a.detailed && a.id && !a.id.startsWith('gen-') && isNum(a.sport) && (a.detailTries || 0) < 3).sort((x, y) => String(y.date).localeCompare(String(x.date))).slice(0, max);
+  const ok = a => a.id && !a.id.startsWith('gen-') && isNum(a.sport);
+  const needDetail = a => !a.detailed && (a.detailTries || 0) < 3;
+  const needLaps = a => a.laps === undefined && (a.lapTries || 0) < 2;
+  const list = Object.values(app.real.acts).filter(a => ok(a) && (needDetail(a) || needLaps(a))).sort((x, y) => String(y.date).localeCompare(String(x.date))).slice(0, max);
   let i = 0;
   for (const a of list) {
     i++; setProgress('Aktivitätsdetails ' + i + '/' + list.length);
-    try {
+    if (needDetail(a)) try {
       const p = await callTool('getActivityDetail', { labelId: a.id, sportType: a.sport });
       const kv = Object.assign({}, p.meta, ...p.records.map(r => r.kv));
       const d = normActivity({ date: a.date, title: '', kv });
@@ -427,6 +430,11 @@ async function fetchDetails(max) {
       if (!isNum(a.distKm) && isNum(d.distKm)) a.distKm = d.distKm;
       a.detailed = true;
     } catch (e) { if (FATAL.has(e.code)) throw e; a.detailTries = (a.detailTries || 0) + 1; if (e.code === 'tool_error') { a.detailed = true; a.detailErr = e.code; } }
+    // Runden mit Ø-Puls → echte Zeit in den Herzfrequenzzonen
+    if (needLaps(a)) try {
+      const lp = await callTool('queryActivityLapData', { labelId: a.id, sportType: a.sport });
+      const laps = parseLaps(lp.raw); a.laps = laps || [];
+    } catch (e) { if (FATAL.has(e.code)) throw e; a.lapTries = (a.lapTries || 0) + 1; if (e.code === 'tool_error') a.laps = []; }
     a._at = Date.now(); store.markDay(a.date);
     await wait(120);
   }
@@ -458,7 +466,7 @@ async function sync(mode) {
     ['Schlaf', () => fetchSleep(span)],
     ['Herzfrequenzvariabilität', () => fetchHrv(span)],
     ['Ruhepuls', () => fetchDaysParam('queryRestingHeartRate', span, r => ({ rhr: normSingle(r, [/resting/, /rhr/]) }))],
-    ['Tageswerte', () => fetchDaysParam('queryDailyHealthData', span, r => { const x = normDaily(r); return { steps: x.steps, kcal: x.kcal }; }, r => { const x = normDaily(r); return { stress: x.stress, rhr: x.rhr, hrv: x.hrv, avgHr: x.avgHr, sleepMin: x.sleepMin }; })],
+    ['Tageswerte', () => fetchDaysParam('queryDailyHealthData', span, r => { const x = normDaily(r); return { steps: x.steps, kcal: x.kcal, exerciseMin: x.exerciseMin }; }, r => { const x = normDaily(r); return { stress: x.stress, rhr: x.rhr, hrv: x.hrv, avgHr: x.avgHr, sleepMin: x.sleepMin }; })],
     ['Stress', () => fetchDaysParam('queryStressLevel', span, r => ({ stress: normSingle(r, [/stress/]) }))],
     ['Ø-Herzfrequenz', () => fetchAvgHr(span)],
     ['Gesundheitscheck', () => fetchCheck(hist ? 21 : first ? 14 : Math.min(span, 7))],
@@ -748,6 +756,7 @@ function viewHeute() {
   const quick = JOURNAL.slice(0, 9);
   h += card('Tagebuch', `<p class="small muted" style="margin-bottom:10px">Was war ${jd === addDays(todayStr(), -1) ? 'gestern Abend' : 'am Abend von ' + esc(fDay(jd))}? Antippen, was zutrifft.</p>
     <div class="chips">${quick.map(b => `<button class="chipbtn" data-act="jtoggle" data-d="${jd}" data-v="${b.id}" aria-pressed="${je.items && je.items[b.id] === true}">${esc(b.label)}</button>`).join('')}</div>
+    ${drinkRow(jd)}
     <div class="row between" style="margin-top:12px"><span class="tiny faint">${app.S.journal[jd] ? 'Gespeichert' : 'Noch nicht ausgefüllt'}</span><button class="btn sm" data-act="sub" data-v="tagebuch">Alle Fragen & Einblicke</button></div>`);
   h += `</div>`;
   // Stress heute
@@ -897,19 +906,45 @@ function viewBioAlter() {
   // Faktoren
   const S30 = H.short ? Object.fromEntries(H.short.metrics.map(m => [m.key, m])) : {};
   const maxY = Math.max(1.5, ...L.metrics.map(m => Math.abs(m.years || 0)));
-  const fv = (m, v) => !isNum(v) ? '–' : m.key === 'sleepH' ? fmtHM(v * 60) + ' h' : ['z13', 'z45', 'strength'].includes(m.key) ? fmt(v) + ' min/Wo.' : m.key === 'rhr' ? fmt(v) + ' bpm' : m.key === 'vo2' ? fmt(v, 1) : fmt(v, m.dec) + (m.unit === '%' ? ' %' : '');
-  let groups = '';
-  for (const g of ['Schlaf', 'Belastung', 'Fitness']) {
-    groups += `<div class="eyebrow" style="margin:${g === 'Schlaf' ? 0 : 16}px 0 4px">${g}</div>`;
-    for (const m of L.metrics.filter(x => x.group === g)) {
+  const fv = (m, v) => {
+    if (m.key === 'smoking') return v && SMOKING[v] ? SMOKING[v].label : 'nicht angegeben';
+    if (!isNum(v)) return '–';
+    if (m.key === 'sleepH') return fmtHM(v * 60) + ' h';
+    if (['active', 'intense', 'strength'].includes(m.key)) return fmt(v) + ' min/Wo.';
+    if (m.key === 'rhr') return fmt(v) + ' bpm';
+    if (m.key === 'hrv') return fmt(v) + ' ms';
+    if (m.key === 'steps') return fmt(v) + ' /Tag';
+    if (m.key === 'alcohol') return fmt(v, 1) + ' /Wo.';
+    if (m.key === 'vo2' || m.key === 'bmi') return fmt(v, 1);
+    return fmt(v, m.dec) + (m.unit === '%' ? ' %' : '');
+  };
+  const missing = m => {
+    if (m.key === 'smoking') return '<button class="btn sm" data-act="sub" data-v="profil" style="padding:2px 8px">angeben</button>';
+    if (m.key === 'bmi') return '<button class="btn sm" data-act="sub" data-v="profil" style="padding:2px 8px">Größe & Gewicht</button>';
+    return 'keine Daten';
+  };
+  const P0 = app.S.profile || {};
+  const bmiManual = !!((P0._manual || {}).heightCm || (P0._manual || {}).weightKg);
+  const srcChip = m => m.input === 'manual' || (m.key === 'bmi' && bmiManual)
+    ? `<span class="srcchip man" title="Von dir eingetragen">eingetragen</span>`
+    : `<span class="srcchip coros" title="Von deiner COROS-Uhr gemessen">gemessen</span>`;
+  const link = m => m.key === 'alcohol' ? ' <button class="linkbtn tiny" data-act="sub" data-v="tagebuch">Getränke eintragen</button>' : m.key === 'smoking' && P0.smoking ? ' <button class="linkbtn tiny" data-act="sub" data-v="profil">ändern</button>' : '';
+  let groups = ''; let first = true;
+  for (const g of HS_GROUPS) {
+    const ms = L.metrics.filter(x => x.group === g); if (!ms.length) continue;
+    groups += `<div class="eyebrow" style="margin:${first ? 0 : 16}px 0 4px">${g}</div>`; first = false;
+    for (const m of ms) {
       const y = m.years; const w = isNum(y) ? clamp(Math.abs(y) / maxY * 50, 1, 50) : 0;
-      const s30 = S30[m.key]; const tr = s30 && isNum(s30.value) && isNum(m.value) ? (s30.years < m.years - 0.05 ? '<span class="up">▲ besser</span>' : s30.years > m.years + 0.05 ? '<span class="down">▼ schwächer</span>' : '<span class="faint">→ stabil</span>') : '';
-      const tgt = m.key === 'vo2' ? 'über Altersmedian ' + fmt(vo2Median(A.P.age, A.P.sex), 1) : m.target;
-      groups += `<div class="hsrow"><div style="min-width:0"><div style="font-weight:600">${esc(m.label)}</div><div class="small"><b class="num">${fv(m, m.value)}</b> <span class="faint">· 30 Tage: ${s30 ? fv(m, s30.value) : '–'}</span></div><div class="tiny faint">Ziel ${esc(tgt)}</div></div>
-        <div><div class="dbar">${isNum(y) ? `<span style="${y <= 0 ? 'right:50%' : 'left:50%'};width:${w}%;background:${y <= 0 ? 'var(--younger)' : 'var(--older)'}"></span>` : ''}</div><div class="yrs">${isNum(y) ? yrs(y) : (m.key === 'lean' ? '<button class="btn sm" data-act="sub" data-v="profil" style="padding:2px 8px">eintragen</button>' : 'keine Daten')} ${tr}</div></div></div>`;
+      const s30 = S30[m.key]; const tr = m.input !== 'manual' && s30 && isNum(s30.value) && isNum(m.value) && isNum(s30.years) && isNum(m.years) ? (s30.years < m.years - 0.05 ? '<span class="up">▲ besser</span>' : s30.years > m.years + 0.05 ? '<span class="down">▼ schwächer</span>' : '<span class="faint">→ stabil</span>') : '';
+      const tgt = m.key === 'vo2' ? 'über Altersmedian ' + fmt(vo2Median(A.P.age, A.P.sex), 1) : m.key === 'hrv' ? 'über Altersmedian ≈ ' + fmt(hrvMedian(A.P.age)) + ' ms' : m.target;
+      const has = m.key === 'smoking' ? !!SMOKING[m.value] : isNum(m.value);
+      const sub = m.key === 'smoking' ? '' : ` <span class="faint">· 30 Tage: ${s30 ? fv(m, s30.value) : '–'}</span>`;
+      groups += `<div class="hsrow"><div style="min-width:0"><div style="font-weight:600">${esc(m.label)} ${srcChip(m)}</div><div class="small"><b class="num">${has ? esc(fv(m, m.value)) : '–'}</b>${sub}</div><div class="tiny faint">Ziel ${esc(tgt)}${link(m)}</div></div>
+        <div><div class="dbar">${isNum(y) ? `<span style="${y <= 0 ? 'right:50%' : 'left:50%'};width:${w}%;background:${y <= 0 ? 'var(--younger)' : 'var(--older)'}"></span>` : ''}</div><div class="yrs">${isNum(y) ? yrs(y) : missing(m)} ${tr}</div></div></div>`;
     }
   }
-  h += card('Die 9 Faktoren', groups + `<div class="legend"><span><i style="background:var(--younger)"></i>macht jünger</span><span><i style="background:var(--older)"></i>macht älter</span></div>`, { right: '6 Monate · Trend 30 Tage' });
+  const nM = L.metrics.filter(m => m.input !== 'manual').length, nE = L.metrics.length - nM;
+  h += card(`Die ${L.metrics.length} Faktoren`, groups + `<div class="legend"><span><i style="background:var(--younger)"></i>macht jünger</span><span><i style="background:var(--older)"></i>macht älter</span><span><span class="srcchip coros">gemessen</span> ${nM} von COROS</span><span><span class="srcchip man">eingetragen</span> ${nE} von dir</span></div>`, { right: '6 Monate · Trend 30 Tage' });
   if (H.hist.length >= 2) {
     h += card('Verlauf', queueChart(el => chartLine(el, H.hist.map(p => ({ x: p.date, y: p.bioAge })), { color: 'var(--age)', ref: H.age, refLabel: 'Kalenderalter', tipFmt: v => 'Bio-Alter ' + fmt(v, 1), yFmt: v => fmt(v, 0), label: 'Bio-Alter Verlauf' })), { right: 'wöchentlich' });
   }
@@ -975,6 +1010,11 @@ function viewTrends() {
 }
 
 /* ---------- Tagebuch ---------- */
+function drinkRow(d) {
+  const e = app.S.journal[d] || {}; const n = drinksOf(e);
+  return `<div class="drinkrow"><div><div style="font-weight:600">Alkohol · Getränke</div><div class="tiny faint">1 Getränk = 10 g Alkohol (z. B. 0,25 l Bier, 0,1 l Wein, 2 cl Schnaps)</div></div>
+    <div class="stepper" role="group" aria-label="Getränke am ${esc(fDay(d))}"><button data-act="drinks" data-d="${d}" data-v="-1" aria-label="Ein Getränk weniger" ${n <= 0 ? 'disabled' : ''}>−</button><span class="n" aria-live="polite">${n}</span><button data-act="drinks" data-d="${d}" data-v="1" aria-label="Ein Getränk mehr">+</button></div></div>`;
+}
 function viewTagebuch() {
   const t = todayStr();
   const jd = app.journalDate || addDays(t, -1);
@@ -983,7 +1023,9 @@ function viewTagebuch() {
   const days = dateRange(addDays(t, -13), t).reverse();
   h += `<section class="card"><div class="card-h"><h2>Eintrag</h2><span class="eyebrow">Abend von ${esc(fDay(jd))}</span></div>
     <div class="chips" style="margin-bottom:14px">${days.map(d => `<button class="chipbtn" data-act="jdate" data-v="${d}" aria-pressed="${d === jd}">${esc(relDay(d))}${app.S.journal[d] ? ' ✓' : ''}</button>`).join('')}</div>
+    <div class="field" style="max-width:240px;margin-bottom:14px"><label for="jdatePick">Anderer Tag (auch rückwirkend)</label><input type="date" id="jdatePick" max="${t}" value="${esc(jd)}"></div>
     <div class="chips">${JOURNAL.map(b => `<button class="chipbtn" data-act="jtoggle" data-d="${jd}" data-v="${b.id}" aria-pressed="${e.items && e.items[b.id] === true}">${esc(b.label)}</button>`).join('')}</div>
+    ${drinkRow(jd)}
     <div class="field" style="margin-top:14px"><label for="jnote">Notiz</label><textarea id="jnote" rows="2" data-d="${jd}" placeholder="z. B. Abendessen um 21 Uhr, Lernnacht">${esc(e.note || '')}</textarea></div>
     ${usingDemo() ? '<p class="tiny faint" style="margin-top:8px">Im Beispielmodus werden Einträge nicht gespeichert.</p>' : ''}</section>`;
   const ins = app.ins.filter(i => i.effect != null);
@@ -1154,7 +1196,7 @@ function viewProfil() {
     <div class="field"><label for="pf-height">Größe (cm)</label><input type="number" inputmode="numeric" id="pf-height" data-pf="heightCm" value="${esc(P.heightCm ?? '')}"></div>
     <div class="field"><label for="pf-weight">Gewicht (kg)</label><input type="number" inputmode="decimal" step="0.1" id="pf-weight" data-pf="weightKg" value="${esc(P.weightKg ?? '')}"></div>
     <div class="field"><label for="pf-hrmax">Max. Herzfrequenz</label><input type="number" inputmode="numeric" id="pf-hrmax" data-pf="hrMax" value="${esc(P.hrMax ?? '')}" placeholder="geschätzt ${DP.hrMax}"><span class="hint">leer lassen = Schätzung 208 − 0,7 × Alter</span></div>
-    <div class="field"><label for="pf-lean">Magermasse (%)</label><input type="number" inputmode="decimal" step="0.1" id="pf-lean" data-pf="leanPct" value="${esc(P.leanPct ?? '')}" placeholder="z. B. 80"><span class="hint">100 − Körperfett % (Waage, DEXA, InBody)</span></div>
+    <div class="field"><label for="pf-smoking">Rauchen / Nikotin</label><select id="pf-smoking" data-pf="smoking"><option value="">nicht angegeben</option>${Object.entries(SMOKING).map(([k, o]) => `<option value="${k}" ${P.smoking === k ? 'selected' : ''}>${esc(o.label)}</option>`).join('')}</select><span class="hint">zählt im Bio-Alter (Faktor „Lebensstil“)</span></div>
   </div>`);
   h += card('Schlaf & Training', `<div class="form">
     <div class="field"><label for="pf-sleep">Grund-Schlafbedarf (Minuten)</label><input type="number" inputmode="numeric" id="pf-sleep" data-pf="sleepBaseMin" value="${esc(P.sleepBaseMin ?? '')}" placeholder="465 = 7 h 45 min"><span class="hint">Erwachsene: meist 450–510</span></div>
@@ -1221,7 +1263,7 @@ function viewAbgleich() {
   let h = subHeader('Geräteabgleich');
   const on = Sync.ready(); const st = Sync.state;
   const status = !on ? '' : st.s === 'error' ? `<div class="banner err" style="margin-bottom:12px"><div class="grow">${esc(st.msg)}</div></div>` : `<p class="small"><span class="pill good"><i></i>aktiv</span> <span class="faint">${st.at ? 'zuletzt abgeglichen ' + esc(ago(st.at)) : 'noch nicht abgeglichen'}</span></p>`;
-  h += card('So funktioniert es', `<p class="small muted">Tagebuch und deine eigenen Angaben (Magermasse, Weckzeit, Schlafbedarf …) werden zwischen Claude, Browser und iPhone abgeglichen. Vor dem Hochladen verschlüsselt Vagus alles mit deinem Passwort. Dein Speicherdienst sieht nur unlesbaren Datensalat. Die COROS-Werte holt jedes Gerät ohnehin selbst.</p>
+  h += card('So funktioniert es', `<p class="small muted">Tagebuch und deine eigenen Angaben (Getränke, Rauchstatus, Weckzeit, Schlafbedarf …) werden zwischen Claude, Browser und iPhone abgeglichen. Vor dem Hochladen verschlüsselt Vagus alles mit deinem Passwort. Dein Speicherdienst sieht nur unlesbaren Datensalat. Die COROS-Werte holt jedes Gerät ohnehin selbst.</p>
     <p class="small faint" style="margin-top:8px">Passwort gut aufbewahren: Ohne es lassen sich die Einträge auf einem neuen Gerät nicht entschlüsseln. Niemand kann es zurücksetzen.</p>`);
   if (Sync.needsPassword()) {
     h += card('Passwort eingeben', `${st.msg ? `<div class="banner err" style="margin-bottom:12px"><div class="grow">${esc(st.msg)}</div></div>` : ''}
@@ -1288,9 +1330,9 @@ function viewMethodik() {
   h += sec('Erholung (0–100 %)', `<p>Vagus vergleicht die nächtliche HRV deiner Uhr mit deinem eigenen 30-Tage-Schnitt (auf logarithmischer Skala, weil HRV schief verteilt ist), ebenso Ruhepuls, Schlafleistung und – wenn vorhanden – Atemfrequenz. Gewichtung: HRV 55 %, Ruhepuls 25 %, Schlaf 15 %, Atmung 5 %. Die Summe wird über eine S-Kurve auf 0–100 % abgebildet; ein durchschnittlicher Tag landet bei etwa 58 %. Grün ab 67 %, Rot bis 33 %.</p><p>Die ersten 4 Nächte mit HRV dienen der Kalibrierung.</p>`);
   h += sec('Belastung (0–21)', `<p>Jede Aktivität wird mit dem TRIMP nach Banister bewertet: Dauer × Herzfrequenzreserve × exponentieller Gewichtung. Krafttraining bekommt 60 % Aufschlag, weil der Puls die muskuläre Arbeit unterschätzt. Alltagsbewegung zählt über die Schritte. Die Summe wird logarithmisch auf 0–21 gestaucht: Jeder weitere Punkt kostet mehr Aufwand als der vorige.</p><p>Das Belastungsziel richtet sich nach der Erholung (Rot 4–10, Gelb 10–14, Grün 14–18) und sinkt um 2, wenn das Verhältnis von 7- zu 28-Tage-Last über 1,4 liegt.</p>`);
   h += sec('Schlaf', `<p>Schlafbedarf = Grundbedarf + Zuschlag für die Belastung des Vortags (bis 50 min) + Abbau von Schlafschuld der letzten 3 Nächte (bis 90 min). Schlafleistung = geschlafene Zeit ÷ Bedarf. Konsistenz bewertet die Streuung von Einschlaf- und Aufwachzeit über 4 Nächte.</p>`);
-  h += sec('Bio-Alter & Alterungstempo', `<p>Neun Faktoren (wie bei WHOOP Healthspan): Schlafkonsistenz, Schlafdauer, Zeit in Zone 1–3 und 4–5, Krafttraining, Schritte, VO₂max, Ruhepuls und Magermasse. Für jeden Faktor liefert eine große Studie das relative Sterberisiko gegenüber einem Durchschnittswert. Dieses Risiko wird mit der Gompertz-Regel (Sterberisiko verdoppelt sich etwa alle 8 Jahre) in Lebensjahre umgerechnet. Weil die Faktoren sich überschneiden, zählt die Summe zu 60 %.</p><p>Das Bio-Alter nutzt 6 Monate. Das Alterungstempo vergleicht die letzten 30 Tage damit: 1× heißt Kalendertempo, 0× heißt Stillstand, negative Werte heißen, dass dein Bio-Alter gerade sinkt.</p>
+  h += sec('Bio-Alter & Alterungstempo', `<p>Zwölf Faktoren, angelehnt an WHOOP Healthspan, aber nur aus Daten, die es wirklich gibt. <b>Gemessen von COROS:</b> Schlafdauer, Schlafkonsistenz, HRV in der Nacht, Ruhepuls, Schritte, aktive Minuten (COROS-Tageswert „Exercise“), intensive Minuten (Zone 4–5 aus dem Puls jeder einzelnen Runde), Krafttraining, VO₂max und BMI (Größe und Gewicht aus deinem COROS-Profil). <b>Von dir eingetragen:</b> Alkohol (Getränke pro Tag im Tagebuch, auch rückwirkend; Tage ohne Eintrag zählen als 0) und Rauchen / Nikotin (einmal im Profil). Die HRV zählt bewusst schwächer, weil Wearable-HRV stark von Gerät und Messzeit abhängt. Für jeden Faktor liefert eine große Studie das relative Sterberisiko gegenüber einem Durchschnittswert. Dieses Risiko wird mit der Gompertz-Regel (Sterberisiko verdoppelt sich etwa alle 8 Jahre) in Lebensjahre umgerechnet. Weil die Faktoren sich überschneiden, zählt die Summe zu 60 %.</p><p>Das Bio-Alter nutzt 6 Monate. Das Alterungstempo vergleicht die letzten 30 Tage damit: 1× heißt Kalendertempo, 0× heißt Stillstand, negative Werte heißen, dass dein Bio-Alter gerade sinkt.</p>
     <ul style="margin:0;padding-left:18px">${HS_METRICS.map(m => `<li><b>${esc(m.label)}</b>: ${esc(m.src)}</li>`).join('')}<li><b>VO₂max-Normwerte</b>: FRIEND-Register (Kaminsky et al., Mayo Clin Proc 2015)</li></ul>`);
-  h += sec('Grenzen', `<p>Vagus ist kein Medizinprodukt. COROS misst anders als WHOOP (keine Hauttemperatur, HRV nur nachts), deshalb sind die Zahlen nicht direkt mit einem WHOOP-Konto vergleichbar. Herzfrequenzzonen schätzt Vagus aus dem Durchschnittspuls, wenn COROS keine Zonenzeiten liefert.</p>`);
+  h += sec('Grenzen', `<p>Vagus ist kein Medizinprodukt. COROS misst anders als WHOOP (keine Hauttemperatur, HRV nur nachts), deshalb sind die Zahlen nicht direkt mit einem WHOOP-Konto vergleichbar. Für die intensiven Minuten im Bio-Alter nutzt Vagus nur echte Rundendaten (Ø-Puls je Runde, Zonen ab 50/60/70/80/90 % der max. Herzfrequenz). Aktivitäten ohne Rundendaten zählen nicht mit und werden auch nicht hochgerechnet. Fehlen Runden bei mehr als 20 % deiner Ausdauerzeit, bleibt der Faktor leer. Hat eine Aktivität nur eine einzige Runde, zählt ihr Durchschnittspuls für die ganze Dauer; harte Intervalle werden dadurch unterschätzt. Der BMI unterscheidet nicht zwischen Muskeln und Fett.</p>`);
   return h;
 }
 
@@ -1355,10 +1397,17 @@ document.addEventListener('click', async ev => {
     case 'jtoggle': {
       const d = t.dataset.d; const J = (usingDemo() ? app.demo : app.real).journal; const e = J[d] || (J[d] = { items: {}, note: '' });
       e.items = Object.assign({}, e.items); e.items[v] = !(e.items[v] === true); e._at = Date.now();
+      if (v === 'alcohol') e.drinks = e.items.alcohol ? Math.max(1, drinksOf(e)) : 0;
       if (!usingDemo()) { store.markJournal(d); store.soon(); Sync.soon(); }
       recompute(); render(); break;
     }
     case 'jdate': app.journalDate = v; render(); break;
+    case 'drinks': {
+      const d = t.dataset.d; const J = (usingDemo() ? app.demo : app.real).journal; const e = J[d] || (J[d] = { items: {}, note: '' });
+      e.drinks = clamp(drinksOf(e) + (+v), 0, 30); e.items = Object.assign({}, e.items, { alcohol: e.drinks > 0 }); e._at = Date.now();
+      if (!usingDemo()) { store.markJournal(d); store.soon(); Sync.soon(); }
+      recompute(); render(); break;
+    }
     case 'trendMetric': app.trend.metric = v; saveUi(); render(); break;
     case 'trendRange': app.trend.range = +v; saveUi(); render(); break;
     case 'skin': app.skin = v; saveUi(); render(); break;
@@ -1423,7 +1472,7 @@ document.addEventListener('change', ev => {
   const el = ev.target;
   if (el.dataset && el.dataset.pf) {
     const k = el.dataset.pf; const P = app.real.profile; let v = el.value;
-    if (['heightCm', 'weightKg', 'hrMax', 'leanPct', 'sleepBaseMin'].includes(k)) v = v === '' ? null : parseFloat(String(v).replace(',', '.'));
+    if (['heightCm', 'weightKg', 'hrMax', 'sleepBaseMin'].includes(k)) v = v === '' ? null : parseFloat(String(v).replace(',', '.'));
     if (v === '' || v == null || (typeof v === 'number' && !isFinite(v))) delete P[k]; else P[k] = v;
     P._manual = Object.assign({}, P._manual, { [k]: true }); P._ts = Object.assign({}, P._ts, { [k]: Date.now() });
     Sync.soon();
@@ -1434,6 +1483,7 @@ document.addEventListener('change', ev => {
     const d = el.dataset.d; const J = (usingDemo() ? app.demo : app.real).journal; const e = J[d] || (J[d] = { items: {}, note: '' }); e.note = el.value.slice(0, 500); e._at = Date.now();
     if (!usingDemo()) { store.markJournal(d); store.soon(); Sync.soon(); }
   }
+  if (el.id === 'jdatePick' && /^\d{4}-\d{2}-\d{2}$/.test(el.value) && el.value <= todayStr()) { app.journalDate = el.value; render(); }
   if (el.id === 'importFile' && el.files && el.files[0]) importFile(el.files[0]);
 });
 document.addEventListener('keydown', ev => {

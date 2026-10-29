@@ -263,6 +263,15 @@ table.t thead th { border-top: 0; color: var(--ink-3); font-weight: 600; font-si
 .hsrow .dbar { position: relative; height: 10px; border-radius: 5px; background: var(--surface-2); }
 .hsrow .dbar::after { content: ""; position: absolute; left: 50%; top: -3px; bottom: -3px; width: 1px; background: var(--ink-3); }
 .hsrow .dbar span { position: absolute; top: 0; bottom: 0; border-radius: 5px; }
+.srcchip { display: inline-block; font-size: 10px; font-weight: 600; letter-spacing: .02em; padding: 1px 6px; border-radius: 999px; vertical-align: 1px; margin-left: 4px; white-space: nowrap; }
+.srcchip.coros { background: var(--surface-2); color: var(--ink-2); border: 1px solid var(--line); }
+.srcchip.man { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--ink); border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent); }
+.linkbtn { background: none; border: 0; padding: 0; color: var(--accent); text-decoration: underline; cursor: pointer; font: inherit; }
+.stepper { display: inline-flex; align-items: center; gap: 0; border: 1px solid var(--line); border-radius: 999px; overflow: hidden; }
+.stepper button { background: var(--surface-2); border: 0; width: 40px; height: 36px; font-size: 18px; color: var(--ink); cursor: pointer; }
+.stepper button:disabled { opacity: .4; cursor: default; }
+.stepper .n { min-width: 44px; text-align: center; font-weight: 700; font-variant-numeric: tabular-nums; }
+.drinkrow { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 10px 0; border-top: 1px solid var(--line); margin-top: 12px; }
 .hsrow .yrs { font-size: 12px; text-align: right; margin-top: 4px; font-variant-numeric: tabular-nums; }
 
 /* ---- Coach ---- */
