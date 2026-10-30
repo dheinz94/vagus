@@ -613,7 +613,7 @@ function analyze(S, opts = {}) {
       if (isFootSport(a) && isNum(a.durMin)) exSteps += a.durMin * (a.sport === 104 || a.sport === 105 || a.sport === 900 || /geh|walk|wander|hike/i.test(a.name || '') ? 105 : 150);
       return { ...a, trimp: t, strain: strainOf(t), zonesUsed: zones, zonesEstimated: !lz && !a.zones, lapZonesUsed: lz, strength: isStrength(a, P.strengthCodes) };
     });
-    const steps = isNum(x.steps) ? x.steps : null;
+    const steps = wornSteps(x);
     const hasDayData = steps != null || list.length || x.sleep || isNum(x.rhr);
     const tBg = hasDayData ? 8 + 2.2 * Math.max(0, (steps || 0) - exSteps) / 1000 : 0;
     r.trimpAct = tAct; r.trimpBg = tBg;
@@ -747,12 +747,15 @@ function parseLaps(raw) {
   }
   return [];
 }
+/** Schritte nur von Tagen, an denen die Uhr getragen wurde (COROS meldet sonst 0 bzw. Reste wie 171) */
+const MIN_WORN_STEPS = 500;
+function wornSteps(x) { if (!x || !isNum(x.steps)) return null; return x.steps >= MIN_WORN_STEPS || (isNum(x.exerciseMin) && x.exerciseMin > 0) ? x.steps : null; }
 function drinksOf(e) { if (!e) return 0; if (isNum(e.drinks)) return e.drinks; return 0; }
 function healthspanWindow(S, A, endDate, windowDays) {
   const start = addDays(endDate, -(windowDays - 1));
   const ds = A.dates.filter(d => d >= start && d <= endDate);
   const days = S.days || {};
-  const withData = ds.filter(d => { const x = days[d] || {}; return isNum(x.steps) || x.sleep || isNum(x.rhr) || (A.actsBy[d] || []).length; });
+  const withData = ds.filter(d => { const x = days[d] || {}; return isNum(wornSteps(x)) || x.sleep || isNum(x.rhr) || (A.actsBy[d] || []).length; });
   if (!withData.length) return null;
   const spanDays = Math.max(7, diffDays(endDate, withData[0]) + 1);
   const weeks = Math.min(windowDays, spanDays) / 7;
@@ -766,7 +769,9 @@ function healthspanWindow(S, A, endDate, windowDays) {
   }
   const cov = cardioMin ? lapMin / cardioMin : (cardioN === 0 ? 1 : 0);
   // heutiger Tag ist noch nicht vorbei → nicht in den Wochenschnitt der aktiven Minuten
-  const exDays = ds.filter(d => d !== todayStr()).filter(d => isNum((days[d] || {}).exerciseMin));
+  // nur abgeschlossene Tage, an denen die Uhr getragen wurde
+  const fullDays = ds.filter(d => d !== todayStr() && isNum(wornSteps(days[d])));
+  const exDays = fullDays.filter(d => isNum((days[d] || {}).exerciseMin));
   const fh = (S.fitnessHist || []).filter(f => isNum(f.vo2max)).sort((a, b) => String(a.date).localeCompare(String(b.date)));
   const before = fh.filter(f => f.date <= endDate);
   const vo2 = before.length ? before[before.length - 1].vo2max : fh.length ? fh[0].vo2max : (S.fitness && isNum(S.fitness.vo2max) ? S.fitness.vo2max : null);
@@ -780,7 +785,7 @@ function healthspanWindow(S, A, endDate, windowDays) {
     consistency: mean(ds.map(d => A.D[d].consistency)),
     hrv: mean(ds.map(d => (days[d] || {}).hrv)),
     rhr: mean(ds.map(d => (days[d] || {}).rhr)),
-    steps: mean(ds.map(d => (days[d] || {}).steps)),
+    steps: mean(fullDays.map(d => wornSteps(days[d]))),
     active: exDays.length >= 5 ? mean(exDays.map(d => days[d].exerciseMin)) * 7 : null,
     intense: hasActs ? (cardioN === 0 ? 0 : cardioNoDur === cardioN && !lapMin ? null : cov >= 0.8 ? intense / weeks : null) : null,
     strength: hasActs ? strength / weeks : null,
@@ -870,7 +875,7 @@ function periodStats(S, A, end, n) {
   return {
     recovery: g(d => A.D[d].recovery), strain: g(d => A.D[d].strain), sleepH: (g(d => A.D[d].sleepMin) ?? NaN) / 60,
     sleepPerf: g(d => A.D[d].sleepPerf), consistency: g(d => A.D[d].consistency),
-    hrv: g(d => (S.days[d] || {}).hrv), rhr: g(d => (S.days[d] || {}).rhr), steps: g(d => (S.days[d] || {}).steps),
+    hrv: g(d => (S.days[d] || {}).hrv), rhr: g(d => (S.days[d] || {}).rhr), steps: mean(ds.filter(d => d !== todayStr()).map(d => wornSteps(S.days[d]))),
     stress: g(d => (S.days[d] || {}).stress),
     green: ds.filter(d => A.D[d].zone === 'green').length, yellow: ds.filter(d => A.D[d].zone === 'yellow').length, red: ds.filter(d => A.D[d].zone === 'red').length,
     actCount: ds.reduce((s, d) => s + ((A.actsBy[d] || []).length), 0),
@@ -955,5 +960,5 @@ if (typeof module !== 'undefined') module.exports = {
   unwrapText, parseSeries, localOf, listVal,
   ymd, dateOf, addDays, diffDays, dateRange, parseDurMin, parseNum, pctOf, findDate, parseText, jsonToRecords, parseResult,
   normSleep, normHrv, normDaily, normCheck, normRecovery, normFitness, normLoad, normUser, normActivity, normSingle,
-  analyze, healthspan, lapZones, parseLaps, HS_GROUPS, drinksOf, SMOKING, hrvMedian, journalInsights, periodStats, makeDemo, zonesFromAvg, trimp, strainOf, vo2Median, HS_METRICS, ageOn
+  analyze, healthspan, lapZones, parseLaps, wornSteps, HS_GROUPS, drinksOf, SMOKING, hrvMedian, journalInsights, periodStats, makeDemo, zonesFromAvg, trimp, strainOf, vo2Median, HS_METRICS, ageOn
 };
